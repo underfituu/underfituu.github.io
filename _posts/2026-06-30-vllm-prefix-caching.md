@@ -1,3 +1,10 @@
+---
+title: prefix-caching性能收益分析
+date: 2026-06-30
+categories: [VLLM]
+tags: [Infra, Infer]     # TAG names should always be lowercase
+---
+
 ## 摘要
 
 随着生成式人工智能进入大规模落地阶段，大语言模型（LLM）的推理性能优化已成为行业关注的核心。在大规模、长上下文的交互场景下，计算资源的浪费和显存带宽的瓶颈限制了系统的高效运转。前缀缓存（Prefix Caching）作为一种通过空间换时间、通过存储换计算的关键技术，正逐步从单机内存管理演变为跨节点的分布式系统优化方案。本报告将从前缀缓存的核心原理出发，重点探讨其在国产昇腾（Ascend）平台上的性能分析手段（涵盖常规输入与超长输入场景）。
@@ -461,9 +468,6 @@ $$
 
 以Qwen3-32B-int8基础稠密模型为例，配置为64K的长输入、2048的块大小、TP4部署，并启用所有优化特性。我们先看看$T_{\mathrm{other}}$ 是不是固定的，随机采两个chunk的耗时：
 
-![image](https://wiki.huawei.com/vision-file-storage/api/file/download/upload-v2/WIKI2026030210265243/39632544/fa144d0cbb2d4738a68436171602486b.png)
-
-![image](https://wiki.huawei.com/vision-file-storage/api/file/download/upload-v2/WIKI2026030210265243/39632542/162e1682fa8340d5a8bcd1ad308c780c.png)
 
 - 第一个块：$T_{\mathrm{other}} = 262.9 - 81.82 = 181.08$ ms
 - 第二个块：$T_{\mathrm{other}} = 868.9 - 688.89 = 180.01$ ms
@@ -476,7 +480,6 @@ $$
 R_{\mathrm{prefix}} = \frac{2534.80 + 180 \times 16}{9416.07 + 180 \times 32} = \frac{5414}{15176} \approx 35\%
 $$
 
-![image](https://wiki.huawei.com/vision-file-storage/api/file/download/upload-v2/WIKI2026030210265243/39632545/b5f0f6f9a871479790fa973b1d11f586.png)
 
 #### 2.2.4 近似分析
 
@@ -529,14 +532,12 @@ $$
 如下图所示，客户场景采集Profiling 数据发现，不同的硬件单个 Chunk 的耗时增长曲线存在显著差异：
 * **非线性增长：** 在 800I-A3-560T 平台上，当 KV 长度在 64K（即 32 个 Chunk）以内时，耗时基本维持线性增长；而一旦进入 64K-80K 区间，耗时增长速率明显加快，线性斜率陡增。
 * **线性增长：** 相比之下，H20 和 800T-A3-752T 平台的耗时曲线表现得更为平滑（“丝滑”），更符合线性预期。‸
-![image](https://wiki.huawei.com/vision-file-storage/api/file/download/upload-v2/WIKI2026030210265243/39771684/44a9c7e727a347eca84cede8eed9cec3.png)
 
 
 
 ##### 2.2.5.2 算子 UT 性能测试
 
 根据2.2.2性能评估公式，假设 **$T_{\mathrm{other}}$**（非计算部分耗时）保持固定，则整体性能波动的核心变量在于 ​**FIA 算子的耗时增长差异**​。下图展示了 FIA 算子在 UT测试环境下，耗时随序列长度变化的实际测试结果：
-![image](https://wiki.huawei.com/vision-file-storage/api/file/download/upload-v2/WIKI2026030210265243/39632543/f21aaa88798643d5a8ed8c450213ca8a.png)
 
 **结论：** 在评估 Prefix Caching 的最终收益时，不能简单进行线性外推。必须充分考量底层算子在不同硬件上的实际性能曲线，并结合 Profiling 数据进行针对性建模，以确保预估收益与实际表现的一致性。
 
@@ -549,7 +550,7 @@ $$
 ## 3. 昇腾使用场景注意事项
 
 - **Block Size 限制**：目前 vLLM-Ascend 版本由于底层算子原因，建议固定 `block_size` 为 128。相比 GPU 默认的 16，这意味着如果平均输入很短（如 1K 以内），末尾不满 128 Token 的块无法形成有效哈希，导致缓存命中率大幅下降。（支持 `block_size` 为 32 的算子正在灰度上库）
-- **显存压力**：昇腾 A3 代际芯片在显存容量上相较于 H20 等竞品可能存在差异。由于 vLLM 原生 Prefix Caching 不支持多 DP（数据并行）间共享缓存，为了减少驱逐（Eviction），建议在显存紧张时减少 DP 数量，或直接采用池化方案，详见[MY节点的经验](https://jx.huawei.com/community/comgroup/postsDetails?postId=737a36b381534acbafb595c2a4a5ac60&noTop=true&type=freePost&previou=comments&welink_open_uri=aDU6Ly80NzE2NTE3MzE0Nzc5NTcvaHRtbC9pbmRleC5odG1sIy9qeC9kZXRhaWw/aWQ9NzM3YTM2YjM4MTUzNGFjYmFmYjU5NWMyYTRhNWFjNjAmdHlwZT1mcmVlX3Bvc3QmdXJsPQ==)、[多DP场景下池化](https://jx.huawei.com/community/comgroup/postsDetails?postId=ba0ce11fecd44a35a0e4f784172cf544&noTop=true&type=freePost&welink_open_uri=aDU6Ly80NzE2NTE3MzE0Nzc5NTcvaHRtbC9pbmRleC5odG1sIy9qeC9kZXRhaWw/aWQ9YmEwY2UxMWZlY2Q0NGEzNWEwZTRmNzg0MTcyY2Y1NDQmdHlwZT1mcmVlX3Bvc3QmdXJsPQ==)。
+- **显存压力**：昇腾 A3 代际芯片在显存容量上相较于 H20 等竞品可能存在差异。由于 vLLM 原生 Prefix Caching 不支持多 DP（数据并行）间共享缓存，为了减少驱逐（Eviction），建议在显存紧张时减少 DP 数量，或直接采用池化方案.
 - **对比策略**：在给客户演示时，如果对方芯片算力较弱，有时关闭 Prefix Caching、直接发挥昇腾的暴力计算能力反而能取得更好的 Prefill 表现。
 
 ## 4. 总结
